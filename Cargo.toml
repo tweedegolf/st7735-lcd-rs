@@ -12,6 +12,8 @@ documentation = "https://docs.rs/st7735-lcd"
 [dependencies]
 embedded-hal = "0.2"
 nb = "0.1"
+async-trait = "0.1"
+async-spi = { path = "../async-spi" }
 
 [dependencies.num-traits]
 version = "0.2"

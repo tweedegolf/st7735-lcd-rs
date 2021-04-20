@@ -9,18 +9,19 @@ use num_derive::ToPrimitive;
 use num_traits::ToPrimitive;
 
 use embedded_hal::blocking::delay::DelayMs;
-use embedded_hal::blocking::spi;
 use embedded_hal::digital::v2::OutputPin;
 
+use async_spi::SPI;
+
 /// ST7735 driver to connect to TFT displays.
-pub struct ST7735<SPI, DC, RST>
+pub struct ST7735<SPIH, DC, RST>
 where
-    SPI: spi::Write<u8>,
+    SPIH: async_spi::SPIHardware + 'static,
     DC: OutputPin,
     RST: OutputPin,
 {
     /// SPI
-    spi: SPI,
+    spi: SPI<SPIH>,
 
     /// Data/command pin.
     dc: DC,
@@ -50,15 +51,15 @@ pub enum Orientation {
     LandscapeSwapped = 0xA0,
 }
 
-impl<SPI, DC, RST> ST7735<SPI, DC, RST>
+impl<SPIH, DC, RST> ST7735<SPIH, DC, RST>
 where
-    SPI: spi::Write<u8>,
+    SPIH: async_spi::SPIHardware + 'static,
     DC: OutputPin,
     RST: OutputPin,
 {
     /// Creates a new driver instance that uses hardware SPI.
     pub fn new(
-        spi: SPI,
+        spi: SPI<SPIH>,
         dc: DC,
         rst: RST,
         rgb: bool,
@@ -82,40 +83,53 @@ where
     }
 
     /// Runs commands to initialize the display.
-    pub fn init<DELAY>(&mut self, delay: &mut DELAY) -> Result<(), ()>
+    pub async fn init<DELAY>(&mut self, delay: &mut DELAY) -> Result<(), ()>
     where
         DELAY: DelayMs<u8>,
     {
         self.hard_reset(delay)?;
-        self.write_command(Instruction::SWRESET, None)?;
+        self.write_command(Instruction::SWRESET, None).await?;
         delay.delay_ms(200);
-        self.write_command(Instruction::SLPOUT, None)?;
+        self.write_command(Instruction::SLPOUT, None).await?;
         delay.delay_ms(200);
-        self.write_command(Instruction::FRMCTR1, Some(&[0x01, 0x2C, 0x2D]))?;
-        self.write_command(Instruction::FRMCTR2, Some(&[0x01, 0x2C, 0x2D]))?;
+        self.write_command(Instruction::FRMCTR1, Some(&[0x01, 0x2C, 0x2D]))
+            .await?;
+        self.write_command(Instruction::FRMCTR2, Some(&[0x01, 0x2C, 0x2D]))
+            .await?;
         self.write_command(
             Instruction::FRMCTR3,
             Some(&[0x01, 0x2C, 0x2D, 0x01, 0x2C, 0x2D]),
-        )?;
-        self.write_command(Instruction::INVCTR, Some(&[0x07]))?;
-        self.write_command(Instruction::PWCTR1, Some(&[0xA2, 0x02, 0x84]))?;
-        self.write_command(Instruction::PWCTR2, Some(&[0xC5]))?;
-        self.write_command(Instruction::PWCTR3, Some(&[0x0A, 0x00]))?;
-        self.write_command(Instruction::PWCTR4, Some(&[0x8A, 0x2A]))?;
-        self.write_command(Instruction::PWCTR5, Some(&[0x8A, 0xEE]))?;
-        self.write_command(Instruction::VMCTR1, Some(&[0x0E]))?;
+        )
+        .await?;
+        self.write_command(Instruction::INVCTR, Some(&[0x07]))
+            .await?;
+        self.write_command(Instruction::PWCTR1, Some(&[0xA2, 0x02, 0x84]))
+            .await?;
+        self.write_command(Instruction::PWCTR2, Some(&[0xC5]))
+            .await?;
+        self.write_command(Instruction::PWCTR3, Some(&[0x0A, 0x00]))
+            .await?;
+        self.write_command(Instruction::PWCTR4, Some(&[0x8A, 0x2A]))
+            .await?;
+        self.write_command(Instruction::PWCTR5, Some(&[0x8A, 0xEE]))
+            .await?;
+        self.write_command(Instruction::VMCTR1, Some(&[0x0E]))
+            .await?;
         if self.inverted {
-            self.write_command(Instruction::INVON, None)?;
+            self.write_command(Instruction::INVON, None).await?;
         } else {
-            self.write_command(Instruction::INVOFF, None)?;
+            self.write_command(Instruction::INVOFF, None).await?;
         }
         if self.rgb {
-            self.write_command(Instruction::MADCTL, Some(&[0x00]))?;
+            self.write_command(Instruction::MADCTL, Some(&[0x00]))
+                .await?;
         } else {
-            self.write_command(Instruction::MADCTL, Some(&[0x08]))?;
+            self.write_command(Instruction::MADCTL, Some(&[0x08]))
+                .await?;
         }
-        self.write_command(Instruction::COLMOD, Some(&[0x05]))?;
-        self.write_command(Instruction::DISPON, None)?;
+        self.write_command(Instruction::COLMOD, Some(&[0x05]))
+            .await?;
+        self.write_command(Instruction::DISPON, None).await?;
         delay.delay_ms(200);
         Ok(())
     }
@@ -131,14 +145,19 @@ where
         self.rst.set_high().map_err(|_| ())
     }
 
-    fn write_command(&mut self, command: Instruction, params: Option<&[u8]>) -> Result<(), ()> {
+    async fn write_command(
+        &mut self,
+        command: Instruction,
+        params: Option<&[u8]>,
+    ) -> Result<(), ()> {
         self.dc.set_low().map_err(|_| ())?;
         self.spi
             .write(&[command.to_u8().unwrap()])
+            .await
             .map_err(|_| ())?;
         if params.is_some() {
             self.start_data()?;
-            self.write_data(params.unwrap())?;
+            self.write_data(params.unwrap()).await?;
         }
         Ok(())
     }
@@ -147,39 +166,44 @@ where
         self.dc.set_high().map_err(|_| ())
     }
 
-    fn write_data(&mut self, data: &[u8]) -> Result<(), ()> {
-        self.spi.write(data).map_err(|_| ())
+    async fn write_data(&mut self, data: &[u8]) -> Result<(), ()> {
+        self.spi.write(data).await.map_err(|_| ())
     }
 
     /// Writes a data word to the display.
-    fn write_word(&mut self, value: u16) -> Result<(), ()> {
-        self.write_data(&value.to_be_bytes())
+    async fn write_word(&mut self, value: u16) -> Result<(), ()> {
+        self.write_data(&value.to_be_bytes()).await
     }
 
-    fn write_words_buffered(&mut self, words: impl IntoIterator<Item = u16>) -> Result<(), ()>{
+    async fn write_words_buffered(
+        &mut self,
+        words: impl IntoIterator<Item = u16>,
+    ) -> Result<(), ()> {
         let mut buffer = [0; 32];
         let mut index = 0;
         for word in words {
             let as_bytes = word.to_be_bytes();
             buffer[index] = as_bytes[0];
-            buffer[index+1] = as_bytes[1];
+            buffer[index + 1] = as_bytes[1];
             index += 2;
             if index >= buffer.len() {
-                self.write_data(&buffer);
+                self.write_data(&buffer).await?;
                 index = 0;
             }
         }
-        self.write_data(&buffer[0..index])
+        self.write_data(&buffer[0..index]).await
     }
 
-    pub fn set_orientation(&mut self, orientation: &Orientation) -> Result<(), ()> {
+    pub async fn set_orientation(&mut self, orientation: &Orientation) -> Result<(), ()> {
         if self.rgb {
-            self.write_command(Instruction::MADCTL, Some(&[orientation.to_u8().unwrap()]))?;
+            self.write_command(Instruction::MADCTL, Some(&[orientation.to_u8().unwrap()]))
+                .await?;
         } else {
             self.write_command(
                 Instruction::MADCTL,
                 Some(&[orientation.to_u8().unwrap() | 0x08]),
-            )?;
+            )
+            .await?;
         }
         Ok(())
     }
@@ -191,42 +215,45 @@ where
     }
 
     /// Sets the address window for the display.
-    fn set_address_window(&mut self, sx: u16, sy: u16, ex: u16, ey: u16) -> Result<(), ()> {
-        self.write_command(Instruction::CASET, None)?;
+    async fn set_address_window(&mut self, sx: u16, sy: u16, ex: u16, ey: u16) -> Result<(), ()> {
+        self.write_command(Instruction::CASET, None).await?;
         self.start_data()?;
-        self.write_word(sx + self.dx)?;
-        self.write_word(ex + self.dx)?;
-        self.write_command(Instruction::RASET, None)?;
+        self.write_word(sx + self.dx).await?;
+        self.write_word(ex + self.dx).await?;
+        self.write_command(Instruction::RASET, None).await?;
         self.start_data()?;
-        self.write_word(sy + self.dy)?;
-        self.write_word(ey + self.dy)
+        self.write_word(sy + self.dy).await?;
+        self.write_word(ey + self.dy).await
     }
 
     /// Sets a pixel color at the given coords.
-    pub fn set_pixel(&mut self, x: u16, y: u16, color: u16) -> Result<(), ()> {
-        self.set_address_window(x, y, x, y)?;
-        self.write_command(Instruction::RAMWR, None)?;
+    pub async fn set_pixel(&mut self, x: u16, y: u16, color: u16) -> Result<(), ()> {
+        self.set_address_window(x, y, x, y).await?;
+        self.write_command(Instruction::RAMWR, None).await?;
         self.start_data()?;
-        self.write_word(color)
+        self.write_word(color).await
     }
 
     /// Writes pixel colors sequentially into the current drawing window
-    pub fn write_pixels<P: IntoIterator<Item = u16>>(&mut self, colors: P) -> Result<(), ()> {
-        self.write_command(Instruction::RAMWR, None)?;
+    pub async fn write_pixels<P: IntoIterator<Item = u16>>(&mut self, colors: P) -> Result<(), ()> {
+        self.write_command(Instruction::RAMWR, None).await?;
         self.start_data()?;
         for color in colors {
-            self.write_word(color)?;
+            self.write_word(color).await?;
         }
         Ok(())
     }
-    pub fn write_pixels_buffered<P: IntoIterator<Item = u16>>(&mut self, colors: P) -> Result<(), ()> {
-        self.write_command(Instruction::RAMWR, None)?;
+    pub async fn write_pixels_buffered<P: IntoIterator<Item = u16>>(
+        &mut self,
+        colors: P,
+    ) -> Result<(), ()> {
+        self.write_command(Instruction::RAMWR, None).await?;
         self.start_data()?;
-        self.write_words_buffered(colors)
+        self.write_words_buffered(colors).await
     }
 
     /// Sets pixel colors at the given drawing window
-    pub fn set_pixels<P: IntoIterator<Item = u16>>(
+    pub async fn set_pixels<P: IntoIterator<Item = u16>>(
         &mut self,
         sx: u16,
         sy: u16,
@@ -234,11 +261,11 @@ where
         ey: u16,
         colors: P,
     ) -> Result<(), ()> {
-        self.set_address_window(sx, sy, ex, ey)?;
-        self.write_pixels(colors)
+        self.set_address_window(sx, sy, ex, ey).await?;
+        self.write_pixels(colors).await
     }
 
-    pub fn set_pixels_buffered<P: IntoIterator<Item = u16>>(
+    pub async fn set_pixels_buffered<P: IntoIterator<Item = u16>>(
         &mut self,
         sx: u16,
         sy: u16,
@@ -246,8 +273,8 @@ where
         ey: u16,
         colors: P,
     ) -> Result<(), ()> {
-        self.set_address_window(sx, sy, ex, ey)?;
-        self.write_pixels_buffered(colors)
+        self.set_address_window(sx, sy, ex, ey).await?;
+        self.write_pixels_buffered(colors).await
     }
 }
 
@@ -256,38 +283,51 @@ extern crate embedded_graphics;
 #[cfg(feature = "graphics")]
 use self::embedded_graphics::{
     drawable::Pixel,
+    image::Image,
     pixelcolor::{
         raw::{RawData, RawU16},
         Rgb565,
     },
-    primitives::Rectangle,
-    style::{Styled, PrimitiveStyle},
-    image::Image,
     prelude::*,
+    primitives::Rectangle,
+    style::{PrimitiveStyle, Styled},
     DrawTarget,
 };
 
 #[cfg(feature = "graphics")]
-impl<SPI, DC, RST> DrawTarget<Rgb565> for ST7735<SPI, DC, RST>
+// async note: upstream trait is not async.
+// impl<SPIH, DC, RST> DrawTarget<Rgb565> for ST7735<SPIH, DC, RST>
+impl<SPIH, DC, RST> ST7735<SPIH, DC, RST>
 where
-    SPI: spi::Write<u8>,
+    SPIH: async_spi::SPIHardware + 'static,
     DC: OutputPin,
     RST: OutputPin,
 {
-    type Error = ();
-
-    fn draw_pixel(&mut self, pixel: Pixel<Rgb565>) -> Result<(), Self::Error> {
+    pub async fn draw_pixel(&mut self, pixel: Pixel<Rgb565>) -> Result<(), ()> {
         let Pixel(Point { x, y }, color) = pixel;
         self.set_pixel(x as u16, y as u16, RawU16::from(color).into_inner())
+            .await
     }
 
-    fn draw_rectangle(
+    /// Draws an object from an iterator over its pixels.
+    pub async fn draw_iter<T>(&mut self, item: T) -> Result<(), ()>
+    where
+        T: IntoIterator<Item = Pixel<Rgb565>>,
+    {
+        for pixel in item {
+            self.draw_pixel(pixel).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn draw_rectangle(
         &mut self,
-        item: &Styled<Rectangle, PrimitiveStyle<Rgb565>>
-    ) -> Result<(), Self::Error> {
+        item: &Styled<Rectangle, PrimitiveStyle<Rgb565>>,
+    ) -> Result<(), ()> {
         let shape = item.primitive;
         let rect_width = shape.bottom_right.x - item.primitive.top_left.x + 1;
-        let rect_height = shape.bottom_right.y - item.primitive.top_left.y +1;
+        let rect_height = shape.bottom_right.y - item.primitive.top_left.y + 1;
         let rect_size = rect_width * rect_height;
 
         match (item.style.fill_color, item.style.stroke_color) {
@@ -301,19 +341,19 @@ where
                     shape.bottom_right.y as u16,
                     iter,
                 )
-            },
+                .await
+            }
             (Some(fill), Some(stroke)) => {
                 let fill_color = RawU16::from(fill).into_inner();
                 let stroke_color = RawU16::from(stroke).into_inner();
                 let iter = (0..rect_size).map(move |i| {
                     if i % rect_width <= item.style.stroke_width as i32
-                    || i % rect_width >= rect_width - item.style.stroke_width as i32
-                    || i <= item.style.stroke_width as i32 * rect_width
-                    || i >= (rect_height - item.style.stroke_width as i32) * rect_width
+                        || i % rect_width >= rect_width - item.style.stroke_width as i32
+                        || i <= item.style.stroke_width as i32 * rect_width
+                        || i >= (rect_height - item.style.stroke_width as i32) * rect_width
                     {
                         stroke_color
-                    }
-                    else {
+                    } else {
                         fill_color
                     }
                 });
@@ -324,21 +364,15 @@ where
                     shape.bottom_right.y as u16,
                     iter,
                 )
-            },
+                .await
+            }
             // TODO: Draw edges as subrectangles
-            (None, Some(_)) => {
-                self.draw_iter(item)
-            }
-            (None, None) => {
-                self.draw_iter(item)
-            }
+            (None, Some(_)) => self.draw_iter(item).await,
+            (None, None) => self.draw_iter(item).await,
         }
     }
 
-    fn draw_image<'a, 'b, I>(
-        &mut self,
-        item: &'a Image<'b, I, Rgb565>
-    ) -> Result<(), Self::Error>
+    pub async fn draw_image<'a, 'b, I>(&mut self, item: &'a Image<'b, I, Rgb565>) -> Result<(), ()>
     where
         &'b I: IntoPixelIter<Rgb565>,
         I: ImageDimensions,
@@ -352,13 +386,14 @@ where
         self.set_pixels_buffered(
             sx,
             sy,
-            ex-1,
-            ey-1,
+            ex - 1,
+            ey - 1,
             item.into_iter().map(|p| RawU16::from(p.1).into_inner()),
         )
+        .await
     }
 
-    fn size(&self) -> Size {
+    pub fn size(&self) -> Size {
         Size::new(self.width, self.height)
     }
 }
